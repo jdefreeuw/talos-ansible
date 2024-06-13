@@ -1,0 +1,74 @@
+---
+- name: Get Talos version
+  hosts: proxmox
+  gather_facts: no
+
+  vars:
+    talos_version_offset: 0
+
+  tasks:
+    - name: Get latest Talos release information
+      when: talosversion is not defined
+      register: talosreleases
+      ansible.builtin.uri:
+        url: "https://api.github.com/repos/siderolabs/talos/releases"
+        body_format: "json"
+
+    - name: Get latest Talos release version
+      when: talosversion is not defined
+      ansible.builtin.set_fact:
+        talosversion: "{{ talosreleases['json'][talos_version_offset]['tag_name'] }}"
+        cacheable: yes
+  
+- name: Update Talos ISO
+  hosts: proxmox
+  gather_facts: no
+
+  vars:
+    arch: "amd64" 
+    
+  tasks:
+
+    - name: Download latest Talos ISO
+      ansible.builtin.uri: 
+        url: "https://github.com/siderolabs/talos/releases/download/{{ talosversion }}/metal-{{ arch }}.iso"
+        dest: "/var/lib/vz/template/iso/talos-metal-{{ talosversion }}.iso"
+        creates: "/var/lib/vz/template/iso/talos-metal-{{ talosversion }}.iso"
+
+- name: Update talosctl
+  hosts: localhost
+  gather_facts: no
+  connection: local
+
+  vars:
+    distro: "darwin"
+    arch: "arm64"
+    talosversion: "{{ hostvars['proxmox']['talosversion'] }}"
+
+  tasks:
+
+    - name: Download latest Talos client
+      ansible.builtin.uri:
+        url: "https://github.com/siderolabs/talos/releases/download/{{ talosversion }}/talosctl-{{ distro }}-{{ arch }}"
+        dest: "/tmp/talosctl-{{ talosversion }}"
+        creates: "/tmp/talosctl-{{ talosversion }}"
+        mode: '755'
+
+    - name: Verify latest Talos client in /tmp
+      register: output
+      failed_when: "talosversion not in output.stdout"
+      ansible.builtin.command:
+        cmd: "/tmp/./talosctl-{{ talosversion }} version"
+
+    - name: Place talosctl into path
+      ansible.builtin.copy:
+        remote_src: yes
+        src: "/tmp/talosctl-{{ talosversion }}"
+        dest: "/usr/local/bin/talosctl"
+    
+    - name: Verify latest Talos client
+      register: output
+      failed_when: "talosversion not in output.stdout"
+      ansible.builtin.command:
+        cmd: "talosctl version"
+  

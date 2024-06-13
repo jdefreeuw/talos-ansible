@@ -1,0 +1,137 @@
+---
+- name: Deploy Talos nodes on Proxmox
+  hosts: talos
+  connection: local
+  gather_facts: no
+
+  tasks:
+
+    - name: Ensure old Talos VMs are deleted
+      community.general.proxmox_kvm:
+        api_host: "{{ hostvars['proxmox']['ansible_host'] }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password }}"
+        state: absent
+        force: true
+        vmid: "{{ vmid }}"
+
+    - name: Build Talos VMs
+      community.general.proxmox_kvm:
+        api_host: "{{ hostvars['proxmox']['ansible_host'] }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password }}"
+        state: present
+        vmid: "{{ vmid }}"
+        node: "pve"
+        cpu: "host"
+        cores: 2
+        memory: 8192
+        name: "{{ inventory_hostname }}"
+        description: "{{ hostvars['proxmox']['talosversion'] }} - {{ now(utc=true,fmt='%Y-%m-%d %H:%M:%S') }}"
+        ide:
+          ide0: "local:iso/talos-metal-{{ hostvars['proxmox']['talosversion'] }}.iso,media=cdrom"
+        scsihw: "virtio-scsi-single"
+        scsi:
+          scsi0: "ssd:32,format=raw"
+        net:
+          net0: "virtio={{ mac_address }},bridge=vmbr0"
+
+    - name: Ensure Talos VMs are running
+      community.general.proxmox_kvm:  
+        api_host: "{{ hostvars['proxmox']['ansible_host'] }}"
+        api_user: "root@pam"
+        api_password: "{{ ansible_password }}"
+        state: started
+        vmid: "{{ vmid }}"
+        node: "pve"
+
+    - name: Confirm Talos nodes are accessible
+      retries: 12
+      delay: 5
+      ansible.builtin.ping:
+
+- name: Generate Talos configs
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars_files:
+    - vars/talosctl.yml
+
+  tasks:
+
+    - name: Create new Talos configs using talosctl
+      ansible.builtin.command:
+        cmd: "talosctl gen config {{ cluster_name }} https://{{ hostvars['talos-control-1']['ip_address'] }}:6443 --output-dir {{ talos_config_dir }} --force"
+    
+- name: Apply Talos configs
+  hosts: talos
+  gather_facts: no
+  connection: local
+
+  vars_files:
+    - vars/talosctl.yml
+
+  tasks:  
+
+    - name: Apply control node configs
+      when: "'talos_control' in group_names"
+      retries: 12
+      delay: 5
+      ansible.builtin.command:
+        cmd: "talosctl apply-config --insecure --nodes {{ ip_address }} --file {{ talos_config_dir }}/controlplane.yaml"
+
+    - name: Apply worker node configs
+      when: "'talos_worker' in group_names"
+      retries: 12
+      delay: 5
+      ansible.builtin.command:
+        cmd: "talosctl apply-config --insecure --nodes {{ ip_address }} --file {{ talos_config_dir }}/worker.yaml"
+
+- name: Bootstrap K8s cluster
+  hosts: talos-control-1
+  gather_facts: no
+  connection: local
+
+  vars_files:
+    - vars/talosctl.yml
+
+  tasks:
+
+    - name: Give Talos cluster a minute to reboot and connect all the nodes
+      ansible.builtin.pause:
+        seconds: 60
+
+    - name: Ensure endpoint is online after configuration set
+      retries: 12
+      delay: 5
+      ansible.builtin.ping:
+
+    - name: Configure talosctl to talk to endpoint
+      environment:
+        TALOSCONFIG: "{{ talos_config_dir }}/talosconfig"
+      ansible.builtin.shell: |
+          talosctl config endpoint {{ ip_address }}
+          talosctl config node {{ ip_address }}
+
+    - name: Bootstrap etcd
+      retries: 24
+      delay: 5
+      environment: 
+        TALOSCONFIG: "{{ talos_config_dir }}/talosconfig"
+      ansible.builtin.command:
+        cmd: "talosctl bootstrap"
+
+    - name: Retrieve kubeconfig from endpoint
+      environment:
+        TALOSCONFIG: "{{ talos_config_dir }}/talosconfig"
+      ansible.builtin.command: "talosctl kubeconfig --force {{ talos_config_dir }}/"
+    
+    - name: Verify all nodes are in Ready state
+      register: kubestatus
+      failed_when: (kubestatus.stdout_lines | length  < (1 + (groups['talos'] | length))) or ((kubestatus.stdout_lines | regex_findall("NotReady") | length) > 0)
+      retries: 60
+      delay: 5
+      environment:
+        KUBECONFIG: "{{ talos_config_dir }}/kubeconfig"
+      ansible.builtin.command: "kubectl get nodes"

@@ -1,0 +1,73 @@
+---
+- name: Prepare network information for cluster
+  hosts: talos
+  connection: local
+  gather_facts: no
+
+  vars:
+    subnet_24: "192.168.1."
+
+  tasks:
+  
+    - name: Generate MAC address for each host
+      ansible.builtin.set_fact:
+        mac_address: "{{ '00:00:00' | community.general.random_mac(seed=inventory_hostname) }}"
+        cacheable: true
+
+    - name: Generate node number
+      ansible.builtin.set_fact:
+        node_num: "{{ inventory_hostname.split('.')[0].split('-')[2] }}"
+
+    - name: Generate VMID/IP /32 (control)
+      when: "'talos_control' in group_names"
+      ansible.builtin.set_fact:
+        vmid: "23{{ node_num }}"
+        cacheable: true
+
+    - name: Generate VMID/IP /32 (worker)
+      when: "'talos_worker' in group_names"
+      ansible.builtin.set_fact:
+        vmid: "24{{ node_num }}"
+        cacheable: true
+
+    - name: Generate IP address
+      ansible.builtin.set_fact:
+        ip_address: "{{ subnet_24 }}{{ vmid }}"
+        cacheable: true
+
+- name: Configure network information on router
+  hosts: pfsense
+  gather_facts: no
+  become: yes
+
+  vars:
+    reset_network: no
+
+  tasks:
+
+    - name: Ensure static lease is available
+      when: (reset_network|bool)
+      with_items: "{{ groups['talos'] }}"
+      pfsensible.core.pfsense_dhcp_static:
+        name: "{{ item }}"
+        hostname: "{{ item }}"
+        macaddr: "{{ hostvars[item]['mac_address'] }}"
+        ipaddr: "{{ hostvars[item]['ip_address'] }}"
+        descr: "{{ hostvars['proxmox']['talosversion'] | default('talos version undefined')}}"
+        state: present
+
+    - name: Restart Unbound DNS service to ensure static entries are mapped
+      when: (reset_network|bool)
+      register: response
+      failed_when: "'unbound has been restarted' not in response.stdout"
+      ansible.builtin.command:
+        cmd: "pfSsh.php playback svc restart unbound"
+    
+    - name: Ensure DNS entries are available
+      when: (reset_network|bool)
+      with_items: "{{ groups ['talos'] }}"
+      until: "lookup('community.general.dig', item) == hostvars[item]['ip_address']"
+      retries: 12
+      delay: 5
+      ansible.builtin.debug: 
+        msg: "Waiting for DNS success"

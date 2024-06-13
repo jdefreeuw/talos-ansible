@@ -1,0 +1,23 @@
+
+ungrouped:
+  hosts:
+    pfsense:
+      ansible_host: 192.168.1.1
+      ansible_user: "ansible"
+    proxmox:
+      ansible_host: 192.168.1.202
+      ansible_user: "root"
+    localhost:
+
+talos_control:
+  hosts:
+    talos-control-[1:3]:
+    
+talos_worker:
+  hosts:
+    talos-worker-[1:3]:
+
+talos:
+  children:
+    talos_control:
+    talos_worker:

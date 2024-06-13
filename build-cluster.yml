@@ -1,0 +1,9 @@
+---
+- import_playbook: update-talos.yml
+  when: hostvars['proxmox']['talosversion'] is not defined
+
+- import_playbook: config-network.yml
+  when: hostvars['talos-control-1']['ip_address'] is not defined
+
+- import_playbook: deploy-talos.yml
+

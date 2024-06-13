@@ -1,0 +1,2 @@
+talos_config_dir: "talosctl"
+cluster_name: "talos-proxmox-cluster"
